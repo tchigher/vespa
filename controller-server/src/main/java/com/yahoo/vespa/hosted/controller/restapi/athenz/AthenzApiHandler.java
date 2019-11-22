@@ -1,15 +1,23 @@
 // Copyright 2019 Oath Inc. Licensed under the terms of the Apache 2.0 license. See LICENSE in the project root.
 package com.yahoo.vespa.hosted.controller.restapi.athenz;
 
+import com.yahoo.config.provision.InstanceName;
+import com.yahoo.config.provision.SystemName;
 import com.yahoo.container.jdisc.HttpRequest;
 import com.yahoo.container.jdisc.HttpResponse;
 import com.yahoo.container.jdisc.LoggingRequestHandler;
 import com.yahoo.jdisc.http.HttpRequest.Method;
+import com.yahoo.restapi.MessageResponse;
 import com.yahoo.restapi.Path;
 import com.yahoo.slime.Cursor;
 import com.yahoo.slime.Slime;
 import com.yahoo.vespa.athenz.api.AthenzDomain;
+import com.yahoo.vespa.athenz.api.AthenzPrincipal;
+import com.yahoo.vespa.athenz.api.AthenzUser;
+import com.yahoo.vespa.hosted.controller.Application;
+import com.yahoo.vespa.hosted.controller.ApplicationController;
 import com.yahoo.vespa.hosted.controller.Controller;
+import com.yahoo.vespa.hosted.controller.TenantController;
 import com.yahoo.vespa.hosted.controller.api.identifiers.Property;
 import com.yahoo.vespa.hosted.controller.api.identifiers.PropertyId;
 import com.yahoo.vespa.hosted.controller.api.integration.entity.EntityService;
@@ -17,9 +25,14 @@ import com.yahoo.vespa.hosted.controller.athenz.impl.AthenzFacade;
 import com.yahoo.restapi.ErrorResponse;
 import com.yahoo.restapi.ResourceResponse;
 import com.yahoo.restapi.SlimeJsonResponse;
+import com.yahoo.vespa.hosted.controller.security.Credentials;
+import com.yahoo.vespa.hosted.controller.tenant.AthenzTenant;
+import com.yahoo.vespa.hosted.controller.tenant.Tenant;
 import com.yahoo.yolean.Exceptions;
 
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -34,12 +47,18 @@ public class AthenzApiHandler extends LoggingRequestHandler {
     private final static Logger log = Logger.getLogger(AthenzApiHandler.class.getName());
 
     private final AthenzFacade athenz;
+    private final AthenzDomain sandboxDomain;
     private final EntityService properties;
+    private final TenantController tenants;
+    private final ApplicationController applications;
 
     public AthenzApiHandler(Context parentCtx, AthenzFacade athenz, Controller controller) {
         super(parentCtx);
         this.athenz = athenz;
+        this.sandboxDomain = new AthenzDomain(sandboxDomainIn(controller.system()));
         this.properties = controller.serviceRegistry().entityService();
+        this.tenants = controller.tenants();
+        this.applications = controller.applications();
     }
 
     @Override
@@ -48,6 +67,7 @@ public class AthenzApiHandler extends LoggingRequestHandler {
         try {
             switch (method) {
                 case GET: return get(request);
+                case POST: return post(request);
                 default: return ErrorResponse.methodNotAllowed("Method '" + method + "' is unsupported");
             }
         }
@@ -62,10 +82,18 @@ public class AthenzApiHandler extends LoggingRequestHandler {
 
     private HttpResponse get(HttpRequest request) {
         Path path = new Path(request.getUri());
+        if (path.matches("/login")) return accessibleInstances(request);
         if (path.matches("/athenz/v1")) return root(request);
         if (path.matches("/athenz/v1/domains")) return domainList(request);
         if (path.matches("/athenz/v1/properties")) return properties();
 
+        return ErrorResponse.notFoundError(String.format("No '%s' handler at '%s'", request.getMethod(),
+                                                         request.getUri().getPath()));
+    }
+
+    private HttpResponse post(HttpRequest request) {
+        Path path = new Path(request.getUri());
+        if (path.matches("/athenz/v1/user")) return signup(request);
         return ErrorResponse.notFoundError(String.format("No '%s' handler at '%s'", request.getMethod(),
                                                          request.getUri().getPath()));
     }
@@ -94,6 +122,53 @@ public class AthenzApiHandler extends LoggingRequestHandler {
             array.addString(athenzDomain.getName());
 
         return new SlimeJsonResponse(slime);
+    }
+
+    private HttpResponse signup(HttpRequest request) {
+        AthenzUser user = athenzUser(request)
+                .orElseThrow(() -> new IllegalArgumentException("No Athenz user principal on request"));
+        athenz.addTenantAdmin(sandboxDomain, user);
+        return new MessageResponse("User '" + user + "' added to admin role of '" + sandboxDomain + "'");
+    }
+
+    private HttpResponse accessibleInstances(HttpRequest request) {
+        Slime slime = new Slime();
+        Optional<AthenzUser> user = athenzUser(request);
+        user.map(AthenzPrincipal::new)
+            .map(Credentials::new)
+            .map(credentials -> athenz.accessibleTenants(tenants.asList(), credentials))
+            .stream()
+            .filter(AthenzTenant.class::isInstance)
+            .map(AthenzTenant.class::cast)
+            .forEach(tenant -> {
+                if (sandboxDomain.equals(tenant.domain())) {
+                    InstanceName userInstance = InstanceName.from(user.get().getName());
+                    applications.asList(tenant.name()).forEach(application -> {
+                        if (application.instances().keySet().contains(userInstance))
+
+                    });
+                }
+                else {
+
+                }
+            });
+        return new SlimeJsonResponse(slime);
+    }
+
+    private static Optional<AthenzUser> athenzUser(HttpRequest request) {
+        return Optional.ofNullable(request.getJDiscRequest().getUserPrincipal()).filter(AthenzPrincipal.class::isInstance)
+                       .map(AthenzPrincipal.class::cast)
+                       .map(AthenzPrincipal::getIdentity)
+                       .filter(AthenzUser.class::isInstance)
+                       .map(AthenzUser.class::cast);
+    }
+
+    private static String sandboxDomainIn(SystemName system) {
+        switch (system) {
+            case main: return "vespa.vespa.tenants.sandbox";
+            case cd:   return "vespa.vespa.cd.tenants.sandbox";
+            default:   throw new IllegalArgumentException("No sandbox domain in system '" + system + "'");
+        }
     }
 
 }

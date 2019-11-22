@@ -11,6 +11,7 @@ import com.yahoo.vespa.athenz.api.AthenzPrincipal;
 import com.yahoo.vespa.athenz.api.AthenzResourceName;
 import com.yahoo.vespa.athenz.api.AthenzRole;
 import com.yahoo.vespa.athenz.api.AthenzService;
+import com.yahoo.vespa.athenz.api.AthenzUser;
 import com.yahoo.vespa.athenz.api.OktaAccessToken;
 import com.yahoo.vespa.athenz.api.OktaIdentityToken;
 import com.yahoo.vespa.athenz.client.zms.RoleAction;
@@ -183,6 +184,8 @@ public class AthenzFacade implements AccessControl {
                                         || tenant.type() == Tenant.Type.athenz && userDomains.contains(((AthenzTenant) tenant).domain()))
                       .collect(Collectors.toUnmodifiableList());
     }
+
+    public void addTenantAdmin(AthenzDomain domain, AthenzUser user) { }
 
     private void deleteApplication(AthenzDomain domain, ApplicationName application, OktaIdentityToken identityToken, OktaAccessToken accessToken) {
         log("deleteProviderResourceGroup(tenantDomain=%s, providerDomain=%s, service=%s, resourceGroup=%s)",
