@@ -84,7 +84,7 @@ public class DocumentOperationExecutorImpl implements DocumentOperationExecutor 
     private final Clock clock;
     private final DelayQueue throttled;
     private final DelayQueue timeouts;
-    private final Map<VisitorControlHandler, VisitorSession> visits = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<VisitorControlHandler, VisitorSession> visits = new ConcurrentHashMap<>();
 
     public DocumentOperationExecutorImpl(ClusterListConfig clustersConfig, AllClustersBucketSpacesConfig bucketsConfig,
                                          DocumentOperationExecutorConfig executorConfig, DocumentAccess access, Clock clock) {
@@ -192,27 +192,46 @@ public class DocumentOperationExecutorImpl implements DocumentOperationExecutor 
             AtomicBoolean done = new AtomicBoolean(false);
             VisitorParameters parameters = asParameters(options, clusters, visitTimeout);
             parameters.setLocalDataHandler(new DumpVisitorDataHandler() {
-                @Override public void onDocument(Document doc, long timeStamp) { context.document(doc); }
+                @Override public void onDocument(Document doc, long timeStamp) {
+                    try {
+                        context.document(doc);
+                    }
+                    catch (Throwable t) {
+                        log.log(SEVERE, "Uncaught when writing visited document", t);
+                        throw t;
+                    }
+                }
                 @Override public void onRemove(DocumentId id) { } // We don't visit removes here.
             });
             parameters.setControlHandler(new VisitorControlHandler() {
                 @Override public void onDone(CompletionCode code, String message) {
-                    super.onDone(code, message);
-                    switch (code) {
-                        case TIMEOUT:
-                            if ( ! hasVisitedAnyBuckets())
-                                context.error(TIMEOUT, "No buckets visited within timeout of " + visitTimeout);
-                        case SUCCESS: // intentional fallthrough
-                        case ABORTED:
-                            context.success(Optional.ofNullable(getProgress())
-                                                    .filter(progress -> ! progress.isFinished())
-                                                    .map(ProgressToken::serializeToString));
-                            break;
-                        default:
-                            context.error(ERROR, message != null ? message : "Visiting failed");
+                    try {
+                        super.onDone(code, message);
+                        switch (code) {
+                            case TIMEOUT:
+                                if (!hasVisitedAnyBuckets()) {
+                                    context.error(TIMEOUT, "No buckets visited within timeout of " + visitTimeout);
+                                    break;
+                                }
+                            case SUCCESS: // intentional fallthrough
+                            case ABORTED:
+                                context.success(Optional.ofNullable(getProgress())
+                                                        .filter(progress -> !progress.isFinished())
+                                                        .map(ProgressToken::serializeToString));
+                                break;
+                            default:
+                                context.error(ERROR, message != null ? message : "Visiting failed");
+                        }
+                        done.set(true); // This may be reached before dispatching thread is done putting us in the map.
+                        visits.computeIfPresent(this, (__, session) -> {
+                            session.destroy();
+                            return null;
+                        });
                     }
-                    done.set(true); // This may be reached before dispatching thread is done putting us in the map.
-                    visits.computeIfPresent(this, (__, session) -> { session.destroy(); return null; });
+                    catch (Throwable t) {
+                        log.log(SEVERE, "Uncaught when completing visit", t);
+                        throw t;
+                    }
                 }
             });
             visits.put(parameters.getControlHandler(), access.createVisitorSession(parameters));
@@ -224,6 +243,10 @@ public class DocumentOperationExecutorImpl implements DocumentOperationExecutor 
         }
         catch (RuntimeException e) {
             context.error(ERROR, Exceptions.toMessageString(e));
+        }
+        catch (Throwable t) {
+            log.log(SEVERE, "Uncaught when setting up visit", t);
+            throw t;
         }
     }
 

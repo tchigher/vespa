@@ -57,6 +57,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.logging.Logger;
@@ -69,6 +70,7 @@ import static com.yahoo.jdisc.http.HttpRequest.Method.POST;
 import static com.yahoo.jdisc.http.HttpRequest.Method.PUT;
 import static java.util.Objects.requireNonNull;
 import static java.util.logging.Level.FINE;
+import static java.util.logging.Level.SEVERE;
 import static java.util.logging.Level.WARNING;
 import static java.util.stream.Collectors.joining;
 
@@ -112,6 +114,7 @@ public class DocumentV1ApiHandler extends AbstractRequestHandler {
     private final DocumentOperationExecutor executor;
     private final DocumentOperationParser parser;
     private final Map<String, Map<Method, Handler>> handlers;
+    private final AtomicReference<VisitOperationsContext> lastVisit = new AtomicReference<>();
 
     @Inject
     public DocumentV1ApiHandler(Metric metric,
@@ -140,33 +143,45 @@ public class DocumentV1ApiHandler extends AbstractRequestHandler {
 
     @Override
     public ContentChannel handleRequest(Request rawRequest, ResponseHandler rawResponseHandler) {
-        HandlerMetricContextUtil.onHandle(rawRequest, metric, getClass());
-        ResponseHandler responseHandler = response -> {
-            HandlerMetricContextUtil.onHandled(rawRequest, metric, getClass());
-            return rawResponseHandler.handleResponse(response);
-        };
-
-        HttpRequest request = (HttpRequest) rawRequest;
         try {
-            Path requestPath = new Path(request.getUri());
-            for (String path : handlers.keySet())
-                if (requestPath.matches(path)) {
-                    Map<Method, Handler> methods = handlers.get(path);
-                    if (methods.containsKey(request.getMethod()))
-                        return methods.get(request.getMethod()).handle(request, new DocumentPath(requestPath), responseHandler);
-
-                    if (request.getMethod() == OPTIONS)
-                        return options(methods.keySet(), responseHandler);
-
-                    return methodNotAllowed(request, methods.keySet(), responseHandler);
+            HandlerMetricContextUtil.onHandle(rawRequest, metric, getClass());
+            ResponseHandler responseHandler = response -> {
+                try {
+                    HandlerMetricContextUtil.onHandled(rawRequest, metric, getClass());
+                    return rawResponseHandler.handleResponse(response);
                 }
-            return notFound(request, handlers.keySet(), responseHandler);
+                catch (Throwable t) {
+                    log.log(SEVERE, "Uncaught during metric reporting", t);
+                    throw t;
+                }
+            };
+
+            HttpRequest request = (HttpRequest) rawRequest;
+            try {
+                Path requestPath = new Path(request.getUri());
+                for (String path : handlers.keySet())
+                    if (requestPath.matches(path)) {
+                        Map<Method, Handler> methods = handlers.get(path);
+                        if (methods.containsKey(request.getMethod()))
+                            return methods.get(request.getMethod()).handle(request, new DocumentPath(requestPath), responseHandler);
+
+                        if (request.getMethod() == OPTIONS)
+                            return options(methods.keySet(), responseHandler);
+
+                        return methodNotAllowed(request, methods.keySet(), responseHandler);
+                    }
+                return notFound(request, handlers.keySet(), responseHandler);
+            }
+            catch (IllegalArgumentException e) {
+                return badRequest(request, e, responseHandler);
+            }
+            catch (RuntimeException e) {
+                return serverError(request, e, responseHandler);
+            }
         }
-        catch (IllegalArgumentException e) {
-            return badRequest(request, e, responseHandler);
-        }
-        catch (RuntimeException e) {
-            return serverError(request, e, responseHandler);
+        catch (Throwable t) {
+            log.log(SEVERE, "Uncaught during handle", t);
+            throw t;
         }
     }
 
@@ -213,7 +228,9 @@ public class DocumentV1ApiHandler extends AbstractRequestHandler {
 
     private ContentChannel getRoot(HttpRequest request, DocumentPath path, ResponseHandler handler) {
         Cursor root = responseRoot(request);
-        executor.visit(parseOptions(request, path).build(), visitorContext(request, root, root.setArray("documents"), handler));
+        VisitOperationsContext context = visitorContext(request, root, root.setArray("documents"), handler);
+        lastVisit.set(context);
+        executor.visit(parseOptions(request, path).build(), context);
         return ignoredContent;
     }
 
@@ -223,7 +240,9 @@ public class DocumentV1ApiHandler extends AbstractRequestHandler {
         options = options.documentType(path.documentType());
         options = options.namespace(path.namespace());
         options = path.group().map(options::group).orElse(options);
-        executor.visit(options.build(), visitorContext(request, root, root.setArray("documents"), handler));
+        VisitOperationsContext context = visitorContext(request, root, root.setArray("documents"), handler);
+        lastVisit.set(context);
+        executor.visit(options.build(), context);
         return ignoredContent;
     }
 
