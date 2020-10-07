@@ -57,6 +57,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -115,6 +118,7 @@ public class DocumentV1ApiHandler extends AbstractRequestHandler {
     private final DocumentOperationParser parser;
     private final Map<String, Map<Method, Handler>> handlers;
     private final AtomicReference<VisitOperationsContext> lastVisit = new AtomicReference<>();
+    private final Queue<OperationContext> contexts = new ConcurrentLinkedQueue<>();
 
     @Inject
     public DocumentV1ApiHandler(Metric metric,
@@ -279,23 +283,25 @@ public class DocumentV1ApiHandler extends AbstractRequestHandler {
         DocumentOperationParameters parameters = parameters();
         parameters = getProperty(request, CLUSTER).map(executor::routeToCluster).map(parameters::withRoute).orElse(parameters);
         parameters = getProperty(request, FIELD_SET).map(parameters::withFieldSet).orElse(parameters);
+        OperationContext context =                      new OperationContext((type, message) -> handleError(request, type, message, responseRoot(request, id), handler),
+                                                                             document -> {
+                                                                                 try {
+                                                                                     Cursor root = responseRoot(request, id);
+                                                                                     document.map(JsonWriter::toByteArray)
+                                                                                             .map(SlimeUtils::jsonToSlime)
+                                                                                             .ifPresent(doc -> SlimeUtils.copyObject(doc.get().field("fields"), root.setObject("fields")));
+                                                                                     respond(document.isPresent() ? 200 : 404,
+                                                                                             root,
+                                                                                             handler);
+                                                                                 }
+                                                                                 catch (Exception e) {
+                                                                                     serverError(request, new RuntimeException(e), handler);
+                                                                                 }
+                                                                             });
+        contexts.add(context);
         executor.get(id,
                      parameters,
-                     new OperationContext((type, message) -> handleError(request, type, message, responseRoot(request, id), handler),
-                                          document -> {
-                                              try {
-                                                  Cursor root = responseRoot(request, id);
-                                                  document.map(JsonWriter::toByteArray)
-                                                          .map(SlimeUtils::jsonToSlime)
-                                                          .ifPresent(doc -> SlimeUtils.copyObject(doc.get().field("fields"), root.setObject("fields")));
-                                                  respond(document.isPresent() ? 200 : 404,
-                                                          root,
-                                                          handler);
-                                              }
-                                              catch (Exception e) {
-                                                  serverError(request, new RuntimeException(e), handler);
-                                              }
-                                          }));
+                                          context);
         return ignoredContent;
     }
 
