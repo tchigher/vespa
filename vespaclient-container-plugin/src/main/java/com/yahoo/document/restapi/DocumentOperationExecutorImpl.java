@@ -409,7 +409,7 @@ public class DocumentOperationExecutorImpl implements DocumentOperationExecutor 
                     synchronized (this) {
                         do {
                             notify();
-                            wait(Math.max(0, waitUntilMillis - clock.millis()));
+                            wait(Math.max(1, waitUntilMillis - clock.millis()));
                         }
                         while (clock.millis() < waitUntilMillis);
                     }
