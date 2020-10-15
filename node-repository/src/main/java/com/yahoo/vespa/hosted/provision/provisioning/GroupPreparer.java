@@ -59,15 +59,12 @@ public class GroupPreparer {
     // active config model which is changed on activate
     public List<Node> prepare(ApplicationId application, ClusterSpec cluster, NodeSpec requestedNodes,
                               List<Node> surplusActiveNodes, MutableInteger highestIndex, int wantedGroups) {
-        boolean dynamicProvisioningEnabled = nodeRepository.canProvisionHosts() && nodeRepository.zone().getCloud().dynamicProvisioning();
-        boolean allocateFully = dynamicProvisioningEnabled && preprovisionCapacityFlag.value().isEmpty();
-
         // Try preparing in memory without lock. Most of the time there should be no changes and we can return nodes
         // previously allocated.
-        {
+        if (false) {
             MutableInteger probePrepareHighestIndex = new MutableInteger(highestIndex.get());
             NodeAllocation probeAllocation = prepareAllocation(application, cluster, requestedNodes, surplusActiveNodes,
-                    probePrepareHighestIndex, wantedGroups, allocateFully, PROBE_LOCK);
+                    probePrepareHighestIndex, wantedGroups, PROBE_LOCK);
             if (probeAllocation.fulfilledAndNoChanges()) {
                 List<Node> acceptedNodes = probeAllocation.finalNodes();
                 surplusActiveNodes.removeAll(acceptedNodes);
@@ -80,9 +77,9 @@ public class GroupPreparer {
         try (Mutex lock = nodeRepository.lock(application)) {
             try (Mutex allocationLock = nodeRepository.lockUnallocated()) {
                 NodeAllocation allocation = prepareAllocation(application, cluster, requestedNodes, surplusActiveNodes,
-                        highestIndex, wantedGroups, allocateFully, allocationLock);
+                        highestIndex, wantedGroups, allocationLock);
 
-                if (dynamicProvisioningEnabled) {
+                if (nodeRepository.zone().getCloud().dynamicProvisioning()) {
                     Version osVersion = nodeRepository.osVersions().targetFor(NodeType.host).orElse(Version.emptyVersion);
                     List<ProvisionedHost> provisionedHosts = allocation.getFulfilledDockerDeficit()
                             .map(deficit -> hostProvisioner.get().provisionHosts(nodeRepository.database().getProvisionIndexes(deficit.getCount()),
@@ -122,12 +119,12 @@ public class GroupPreparer {
 
     private NodeAllocation prepareAllocation(ApplicationId application, ClusterSpec cluster, NodeSpec requestedNodes,
                                            List<Node> surplusActiveNodes, MutableInteger highestIndex, int wantedGroups,
-                                           boolean allocateFully, Mutex allocationLock) {
+                                           Mutex allocationLock) {
         LockedNodeList allNodes = nodeRepository.list(allocationLock);
         NodeAllocation allocation = new NodeAllocation(allNodes, application, cluster, requestedNodes,
                 highestIndex, nodeRepository);
         NodePrioritizer prioritizer = new NodePrioritizer(allNodes,
-                application, cluster, requestedNodes, wantedGroups, allocateFully, nodeRepository);
+                application, cluster, requestedNodes, wantedGroups, nodeRepository);
 
         prioritizer.addApplicationNodes();
         prioritizer.addSurplusNodes(surplusActiveNodes);

@@ -6,7 +6,6 @@ import com.yahoo.config.provision.Environment;
 import com.yahoo.config.provision.NodeResources;
 import com.yahoo.config.provision.SystemName;
 import com.yahoo.config.provision.Zone;
-import com.yahoo.vespa.hosted.provision.Node;
 import com.yahoo.vespa.hosted.provision.NodeRepository;
 
 import java.util.Locale;
@@ -73,12 +72,12 @@ public class NodeResourceLimits {
     }
 
     private double minAdvertisedDiskGb(NodeResources requested) {
-        if (requested.storageType() == NodeResources.StorageType.local && zone().getCloud().dynamicProvisioning()) {
-            if (zone().system() == SystemName.Public)
-                return 10 + minRealDiskGb();
-            else
-                return 55 + minRealDiskGb();
-        }
+//        if (requested.storageType() == NodeResources.StorageType.local && zone().getCloud().dynamicProvisioning()) {
+//            if (zone().system() == SystemName.Public)
+//                return 10 + minRealDiskGb();
+//            else
+//                return 55 + minRealDiskGb();
+//        }
         return 4 + minRealDiskGb();
     }
 

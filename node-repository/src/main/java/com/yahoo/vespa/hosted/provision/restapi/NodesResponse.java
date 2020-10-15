@@ -32,7 +32,7 @@ import java.util.function.Function;
 /**
 * @author bratseth
 */
-class NodesResponse extends HttpResponse {
+public class NodesResponse extends HttpResponse {
 
     /** The responses this can create */
     public enum ResponseType { nodeList, stateList, nodesInStateList, singleNode }

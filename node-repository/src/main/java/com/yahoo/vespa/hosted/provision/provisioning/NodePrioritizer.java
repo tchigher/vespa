@@ -37,20 +37,17 @@ public class NodePrioritizer {
     private final boolean isDocker;
     private final boolean isAllocatingForReplacement;
     private final boolean isTopologyChange;
-    /** If set, a host can only have nodes by single tenant and does not allow in-place resizing.  */
-    private final boolean allocateFully;
     private final int currentClusterSize;
     private final Set<Node> spareHosts;
 
     NodePrioritizer(LockedNodeList allNodes, ApplicationId application, ClusterSpec clusterSpec, NodeSpec nodeSpec,
-                    int wantedGroups, boolean allocateFully, NodeRepository nodeRepository) {
+                    int wantedGroups, NodeRepository nodeRepository) {
         this.allNodes = allNodes;
         this.capacity = new HostCapacity(allNodes, nodeRepository.resourcesCalculator());
         this.requestedNodes = nodeSpec;
         this.clusterSpec = clusterSpec;
         this.application = application;
         this.spareHosts = capacity.findSpareHosts(allNodes.asList(), nodeRepository.spareCount());
-        this.allocateFully = allocateFully;
         this.nodeRepository = nodeRepository;
 
         NodeList nodesInCluster = allNodes.owner(application).type(clusterSpec.type()).cluster(clusterSpec.id());
@@ -98,18 +95,6 @@ public class NodePrioritizer {
         LockedNodeList candidates = allNodes
                 .filter(node -> node.type() != NodeType.host || nodeRepository.canAllocateTenantNodeTo(node))
                 .filter(node -> node.reservedTo().isEmpty() || node.reservedTo().get().equals(application.tenant()));
-
-        if (allocateFully) {
-            Set<String> candidateHostnames = candidates.asList().stream()
-                                                       .filter(node -> node.type() == NodeType.tenant)
-                                                       .filter(node -> node.allocation()
-                                                                           .map(a -> a.owner().tenant().equals(this.application.tenant()))
-                                                                           .orElse(false))
-                                                       .flatMap(node -> node.parentHostname().stream())
-                                                       .collect(Collectors.toSet());
-
-            candidates = candidates.filter(node -> candidateHostnames.contains(node.hostname()));
-        }
 
         addNewDockerNodesOn(candidates);
     }
@@ -161,8 +146,7 @@ public class NodePrioritizer {
                                              spareHosts.contains(parent.get()),
                                              isSurplus,
                                              false,
-                                             !allocateFully
-                                             && requestedNodes.canResize(node.resources(),
+                                             requestedNodes.canResize(node.resources(),
                                                                          capacity.freeCapacityOf(parent.get(), false),
                                                                          isTopologyChange,
                                                                          currentClusterSize));
