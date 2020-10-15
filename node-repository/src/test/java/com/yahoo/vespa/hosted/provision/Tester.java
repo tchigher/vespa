@@ -42,7 +42,6 @@ import java.util.Random;
 import java.util.Set;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 import static com.yahoo.config.provision.NodeResources.DiskSpeed.fast;
 import static com.yahoo.config.provision.NodeResources.DiskSpeed.slow;
@@ -50,7 +49,6 @@ import static com.yahoo.config.provision.NodeResources.StorageType.local;
 import static com.yahoo.config.provision.NodeResources.StorageType.remote;
 import static com.yahoo.vespa.hosted.provision.Tester.VespaFlavor.DiskType.EBS_GP2;
 import static com.yahoo.vespa.hosted.provision.Tester.VespaFlavor.DiskType.NVMe;
-import static com.yahoo.vespa.hosted.provision.Tester.VespaFlavor.Environment.VIRTUAL_MACHINE;
 import static com.yahoo.yolean.Exceptions.uncheck;
 
 /**
@@ -66,6 +64,13 @@ public class Tester {
 
     @Test
     public void test() {
+        List<NodeAllocation> nodes = parse(Paths.get("src/test/resources/nodes.json"));
+
+        provison(nodes);
+        naive(nodes);
+    }
+
+    private static void provison(List<NodeAllocation> nodes) {
         MockNameResolver nameResolver = new MockNameResolver();
         MockHostProvisioner hostProvisioner = new MockHostProvisioner(nameResolver);
         ProvisioningTester tester = new ProvisioningTester.Builder()
@@ -74,12 +79,18 @@ public class Tester {
                 .nameResolver(nameResolver)
                 .build();
 
-        List<NodeAllocation> nodes = parse(Paths.get("src/test/resources/nodes.json"));
-
         activate(tester, hostProvisioner, nodes);
+
+        Map<NodeResources, VespaFlavor> vespaFlavorByAdvertisedResources = Arrays.stream(VespaFlavor.values())
+                .collect(Collectors.toMap(VespaFlavor::advertisedResources, v -> v));
+        int cost = tester.nodeRepository().getNodes(NodeType.host).stream()
+                .mapToInt(host -> vespaFlavorByAdvertisedResources.get(host.resources()).cost())
+                .sum();
+
+        System.out.println(cost);
         System.out.println(tester.nodeRepository().getNodes().stream()
                 .collect(Collectors.groupingBy(Node::type,
-                        Collectors.mapping(Node::resources, Collectors.reducing(NodeResources.unspecified(), NodeResources::add)))));
+                        Collectors.mapping(n -> n.resources().justNumbers(), Collectors.reducing(NodeResources.unspecified(), NodeResources::add)))));
     }
 
     private static void naive(List<NodeAllocation> nodes) {
@@ -89,7 +100,6 @@ public class Tester {
                     VespaFlavor vf = findNearestResources(na.nodeResources);
                     NodeResources hostResources = vf.advertisedResources()
                             .withDiskGb(vf.disk().type().isRemote() ? na.nodeResources.diskGb() : vf.disk().sizeInBase10Gb);
-                    System.out.println(toString(na.nodeResources) + " " + toString(hostResources));
                     map.computeIfPresent(NodeType.tenant, (k, nr) -> nr.justNumbers().add(na.nodeResources));
                     map.computeIfPresent(NodeType.host, (k, nr) -> nr.justNumbers().add(hostResources));
                     return vf.cost + (vf.disk().type().isRemote() ? na.nodeResources.diskGb() * 0.1 : 0);
@@ -226,8 +236,7 @@ public class Tester {
     }
 
     static class MockHostProvisioner implements HostProvisioner {
-
-        private static final NodeResources hostResources = new NodeResources(72, 144, 1800, 25).justNumbers();
+        private static final NodeResources hostResources = VespaFlavor.aws_m5d_16xlarge.advertisedResources();
 
         private final MockNameResolver nameResolver;
 
@@ -237,7 +246,7 @@ public class Tester {
 
         @Override
         public List<ProvisionedHost> provisionHosts(List<Integer> provisionIndexes, NodeResources resources, ApplicationId applicationId, Version osVersion) {
-            Flavor hostFlavor = new Flavor(hostResources.with(resources.diskSpeed()).with(resources.storageType()));
+            Flavor hostFlavor = new Flavor(hostResources.satisfies(resources) ? hostResources : findNearestResources(resources).advertisedResources());
             return provisionIndexes.stream()
                     .map(index -> new ProvisionedHost(
                             "host" + index, "host" + index, hostFlavor, "host" + index + "-1", resources, osVersion))
@@ -276,12 +285,9 @@ public class Tester {
         public void deprovision(Node host) {
             throw new UnsupportedOperationException("Not implemented");
         }
-
-
     }
 
     public enum VespaFlavor {
-
         aws_t3_nano(     "aws-t3.nano",      "t3.nano",       0.5, 0.45,   0.5,                4),
         aws_t3_micro(    "aws-t3.micro",     "t3.micro",      0.5, 0.94,   1,                  7),
         aws_t3_small(    "aws-t3.small",     "t3.small",      0.5, 1.80,   2,                 15),
@@ -344,15 +350,12 @@ public class Tester {
         aws_z1d_6xlarge( "aws-z1d.6xlarge",  "z1d.6xlarge",  24, 185.00, 192, NVMe.GB(900), 1607);
 
         private final String name;
-        private final Environment environment;
         private final double cpus;
-        private final double cpuSpeedup;
         private final double memory;
-        private final Optional<Double> advertisedMemory;
+        private final double advertisedMemory;
         private final Disk disk;
-        private final Bandwidth bandwidth;
         private final int cost;
-        private final Optional<String> awsInstanceType;
+        private final String awsInstanceType;
 
         /** For flavors used in AWS */
         VespaFlavor(String name, String awsInstanceType, double cpus, double memory, double advertisedMemory, int cost) {
@@ -364,55 +367,34 @@ public class Tester {
 
         /** For flavors used in AWS */
         VespaFlavor(String name, String awsInstanceType, double cpus, double memory, double advertisedMemory, Disk disk, int cost) {
-            this(name, VIRTUAL_MACHINE, cpus, 1.0, memory, disk, Bandwidth.NET_10GBIT /* TODO: Find the actual value */,
-                    cost, Optional.of(advertisedMemory), Optional.of(awsInstanceType));
-        }
-
-
-        VespaFlavor(String name, Environment environment, double cpus, double cpuSpeedup,
-                    double memory, Disk disk, Bandwidth bandwidth, int cost,
-                    Optional<Double> advertisedMemory, Optional<String> awsInstanceType) {
             this.name = name;
-            this.environment = environment;
             this.cpus = cpus;
-            this.cpuSpeedup = cpuSpeedup;
             this.memory = memory;
             this.advertisedMemory = advertisedMemory;
             this.disk = disk;
-            this.bandwidth = bandwidth;
             this.cost = cost;
             this.awsInstanceType = awsInstanceType;
         }
 
-        public static Optional<VespaFlavor> fromVespaFlavorName(String flavorName) {
-            return Stream.of(VespaFlavor.values())
-                    .filter(f -> f.name.equals(flavorName))
-                    .findFirst();
-        }
-
-        public Environment environment() { return environment; }
+        public String vespaFlavorName() { return name; }
         public double memoryGb() { return memory; }
         public Disk disk() { return disk; }
-
-        // Cap reported network bandwidth for host to 10Gbps until we have switches that can handle more
-        public Bandwidth bandwidth() { return (Double.compare(bandwidth.gbits(),
-                Bandwidth.NET_10GBIT.gbits()) > 0) ? Bandwidth.NET_10GBIT : bandwidth; }
 
         public NodeResources resources() {
             return new NodeResources(cpus,
                     memory,
                     disk.sizeInBase10Gb(),
-                    bandwidth.gbits(),
+                    10,
                     disk().type().isFast() ? fast : slow,
                     disk().type().isRemote() ? remote : local);
         }
 
         /** Returns the resources for this flavor as advertised by the cloud provider */
         public NodeResources advertisedResources() {
-            return new NodeResources(cpus * cpuSpeedup,
-                    advertisedMemory.orElse(memory),
+            return new NodeResources(cpus,
+                    advertisedMemory,
                     disk.sizeInBase10Gb(),
-                    bandwidth.gbits(),
+                    10,
                     disk().type().isFast() ? fast : slow,
                     disk().type().isRemote() ? remote : local);
         }
@@ -420,12 +402,9 @@ public class Tester {
         /** Returns the cost of this node in USD per month */
         public int cost() { return cost; }
 
-        public Optional<String> awsInstanceType() {
+        public String awsInstanceType() {
             return awsInstanceType;
         }
-
-        public enum Environment { BARE_METAL, VIRTUAL_MACHINE }
-
 
         public enum DiskType {
             DISK, SSD, NVMe, EBS_GP2;
@@ -444,7 +423,6 @@ public class Tester {
         }
 
         public static class Disk {
-
             private final DiskType diskType;
             private final double sizeInBase10Gb;
 
@@ -458,39 +436,11 @@ public class Tester {
             }
 
             /** Returns disk size in GB in base 2 (1GB = 10^9 bytes) */
-            public double sizeInBase10Gb() {
-                return sizeInBase10Gb;
-            }
+            public double sizeInBase10Gb() { return sizeInBase10Gb; }
 
             /** Returns disk size in GB in base 2, also known as GiB (1GiB = 2^30 bytes), rounded to nearest integer value */
-            public double sizeInBase2Gb() {
-                return Math.round(sizeInBase10Gb / Math.pow(1.024, 3));
-            }
+            public double sizeInBase2Gb() { return Math.round(sizeInBase10Gb / Math.pow(1.024, 3)); }
         }
-
-        public enum Bandwidth {
-
-            NET_1GBIT(  1),
-            NET_10GBIT(10),
-            NET_25GBIT(25);
-
-            /* Gbit/s of network bandwidth */
-            private final double gbits;
-
-            Bandwidth(double gbits) {
-                this.gbits = gbits;
-            }
-
-            public double mbits() {
-                return gbits * 1000;
-            }
-
-            public double gbits() {
-                return gbits;
-            }
-
-        }
-
     }
 
 }
